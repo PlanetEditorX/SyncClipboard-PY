@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import logging
 import threading
 import pyperclip
@@ -8,6 +9,10 @@ from threading import Thread
 from urllib.parse import unquote
 from common.utils import BASE_DIR
 from common.notification import show_notification
+from server.core.file_latest import (
+    FILE_SHARE_TTL_SECONDS,
+    is_file_record_expired,
+)
 from server.core.text_tracker import TextTracker
 from flask import Flask, jsonify, send_file, after_this_request, request
 
@@ -37,6 +42,8 @@ class FileServer:
         self.center_host = center_host
         self.center_port = center_port
         self.shared_files = {}
+        self.shared_file_registered_at = {}
+        self._shared_files_lock = threading.RLock()
         self.app = Flask(__name__)
         # 关闭 Flask 默认访问日志
         logging.getLogger("werkzeug").setLevel(logging.ERROR)
@@ -67,9 +74,12 @@ class FileServer:
         def files():
             client_ip = request.remote_addr
             logger.info(f"获取文件下载列表 - 请求来自: {client_ip}")
+            self._purge_expired_files()
+            with self._shared_files_lock:
+                shared_files = self.shared_files.copy()
             return jsonify({
-                "count": len(self.shared_files),
-                "files": self.shared_files
+                "count": len(shared_files),
+                "files": shared_files
             })
 
         @self.app.route("/update/current_latest", methods=["POST"])
@@ -99,7 +109,15 @@ class FileServer:
                         logging.info(f"更新剪贴板: {latest['content'][:50]} (来自 {latest['source']})")
             else:
                 logger.info(f"更新文件列表 - 请求来自: {client_ip}")
-                latest = data.get("latest_global")
+                latest = data.get("latest_global") or []
+                if isinstance(latest, dict):
+                    latest = [latest]
+                if not isinstance(latest, list):
+                    latest = []
+                latest = [
+                    item for item in latest
+                    if not is_file_record_expired(item)
+                ]
                 # 获取本地已存储的文件
                 file_latest = get_files_latest_file()
                 if latest == file_latest:
@@ -171,7 +189,7 @@ class FileServer:
             client_ip = request.remote_addr
             logger.info(f"检测文件状态 - 请求来自: {client_ip}")
 
-            path = self.shared_files.get(file_id)
+            path = self.get_file_path(file_id)
             if not path:
                 return jsonify({"status": "error", "message": "file_id不存在"}), 404
 
@@ -187,7 +205,7 @@ class FileServer:
             source = request.headers.get("source", "未知设备")
             logger.info(f"获取文件下载 - 请求来自: {unquote(request.headers.get('source', ''))}({client_ip})")
 
-            path = self.shared_files.get(file_id)
+            path = self.get_file_path(file_id)
             if not path:
                 return jsonify({"status": "error", "message": "file_id不存在"}), 404
 
@@ -215,29 +233,52 @@ class FileServer:
         path : str
             本地文件路径
         """
-        self.shared_files[file_id] = path
+        with self._shared_files_lock:
+            self.shared_files[file_id] = path
+            self.shared_file_registered_at[file_id] = time.time()
         logger.info("注册共享文件: %s -> %s", file_id, path)
 
     def unregister_file(self, file_id):
         """
         取消共享
         """
-        if file_id in self.shared_files:
-            path = self.shared_files.pop(file_id)
+        with self._shared_files_lock:
+            path = self.shared_files.pop(file_id, None)
+            self.shared_file_registered_at.pop(file_id, None)
+        if path is not None:
             logger.info("取消共享文件: %s -> %s", file_id, path)
 
     def clear_files(self):
         """
         清空共享列表
         """
-        self.shared_files.clear()
+        with self._shared_files_lock:
+            self.shared_files.clear()
+            self.shared_file_registered_at.clear()
         logger.info("共享文件列表已清空")
+
+    def _purge_expired_files(self, now=None):
+        """从本机文件服务中移除已超过共享期限的文件。"""
+        current_time = time.time() if now is None else now
+        with self._shared_files_lock:
+            expired_ids = [
+                file_id
+                for file_id, registered_at in self.shared_file_registered_at.items()
+                if current_time - registered_at >= FILE_SHARE_TTL_SECONDS
+            ]
+            for file_id in expired_ids:
+                path = self.shared_files.pop(file_id, None)
+                self.shared_file_registered_at.pop(file_id, None)
+                logger.info("共享文件已过期: %s -> %s", file_id, path)
+        return len(expired_ids)
 
     def get_file_path(self, file_id):
         """
         获取文件路径
         """
-        return self.shared_files.get(file_id)
+        self._purge_expired_files()
+        with self._shared_files_lock:
+            return self.shared_files.get(file_id)
 
     def start(self):
         """启动文件服务器"""

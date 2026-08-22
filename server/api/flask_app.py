@@ -303,11 +303,20 @@ def push_notify(_type, latest, ip, port, os, source, latest_global):
 
 def get_timestamp(data):
     """返回时间戳"""
+    item = None
     if isinstance(data, dict):
-        return data.get("timestamp", datetime.now().isoformat())
+        item = data
+    elif isinstance(data, list) and data and isinstance(data[0], dict):
+        item = data[0]
 
-    if isinstance(data, list) and data and isinstance(data[0], dict):
-        return data[0].get("timestamp", datetime.now().isoformat())
+    if item:
+        if item.get("timestamp"):
+            return item["timestamp"]
+        if item.get("updated_at") is not None:
+            try:
+                return datetime.fromtimestamp(float(item["updated_at"])).isoformat()
+            except (TypeError, ValueError, OSError):
+                pass
 
     return datetime.now().isoformat()
 
@@ -843,16 +852,8 @@ def request_file():
             name = info.get("name")
             size = info.get("size")
             src = info.get("source")
-            timestamp_str = info.get("updated_at")
-            is_new = True
-            if timestamp_str:
-                record_time = datetime.fromtimestamp(timestamp_str)  # 本地时间
-                if datetime.now() - record_time > timedelta(minutes=10):
-                    logger.info(f"文件记录已过期（超过10分钟），跳过: {timestamp_str}")
-                    is_new = False
-
             # 必须有 ip/port/file_id 才能构建下载地址
-            if file_id and ip and port and is_new:
+            if file_id and ip and port:
                 download_url = f"http://{ip}:{port}/file/{file_id}"
                 file_list.append({
                     "file_id": file_id,
@@ -867,7 +868,7 @@ def request_file():
         # 一次性清空所有记录（文件已交付给请求方）
         latest_file.clear()
 
-        if file_list and is_new:
+        if file_list:
             return jsonify({
                 "status": "ok",
                 "type": "file_list",

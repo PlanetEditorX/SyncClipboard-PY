@@ -6,6 +6,21 @@ from common.utils import BASE_DIR
 
 FILE_LATEST_FILE = BASE_DIR / "latest" / "file_latest.json"
 FILE_LATEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+FILE_SHARE_TTL_SECONDS = 10 * 60
+
+
+def is_file_record_expired(record, now=None):
+    """Return whether a shared-file record is no longer valid."""
+    if not isinstance(record, dict):
+        return True
+
+    try:
+        updated_at = float(record.get("updated_at"))
+    except (TypeError, ValueError):
+        return True
+
+    current_time = time.time() if now is None else now
+    return current_time - updated_at >= FILE_SHARE_TTL_SECONDS
 
 class FileLatestTracker:
     def __init__(self):
@@ -19,6 +34,10 @@ class FileLatestTracker:
         with open(FILE_LATEST_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
 
+        # 旧格式没有 updated_at 时，用文件本身的修改时间迁移。这样时间戳稳定，
+        # 不会因为每次读取都补成当前时间而让陈旧记录永久续期。
+        fallback_updated_at = os.path.getmtime(FILE_LATEST_FILE)
+
         # 兼容旧版：如果存的是单个字典，转成列表
         if isinstance(data, dict):
             # 旧数据可能缺少 port / updated_at，补全后放入列表
@@ -30,12 +49,18 @@ class FileLatestTracker:
                 "source": data.get("source"),
                 "ip": data.get("ip"),
                 "port": data.get("port"),
-                "updated_at": data.get("updated_at", time.time())
+                "updated_at": data.get("updated_at", fallback_updated_at)
             }
             return [item] if item["file_id"] else []
 
+        if not isinstance(data, list):
+            return []
+
         # 已经是列表，确保每个条目字段完整
+        normalized = []
         for item in data:
+            if not isinstance(item, dict):
+                continue
             item.setdefault("file_id", None)
             item.setdefault("path", None)
             item.setdefault("name", None)
@@ -43,8 +68,9 @@ class FileLatestTracker:
             item.setdefault("source", None)
             item.setdefault("ip", None)
             item.setdefault("port", None)
-            item.setdefault("updated_at", time.time())
-        return data
+            item.setdefault("updated_at", fallback_updated_at)
+            normalized.append(item)
+        return normalized
 
     def _save(self):
         with open(FILE_LATEST_FILE, "w", encoding="utf-8") as f:
@@ -58,6 +84,7 @@ class FileLatestTracker:
             raise ValueError("file_id cannot be empty")
 
         now = time.time()
+        self.purge_expired(now=now, save=False)
         # 查找是否已存在该 file_id
         for item in self.data:
             if item["file_id"] == file_id:
@@ -88,14 +115,29 @@ class FileLatestTracker:
         if save:
             self._save()
 
+    def purge_expired(self, now=None, save=True):
+        """移除超过共享期限或缺少有效时间戳的文件记录。"""
+        active = [
+            item for item in self.data
+            if not is_file_record_expired(item, now=now)
+        ]
+        removed_count = len(self.data) - len(active)
+        if removed_count:
+            self.data = active
+            if save:
+                self._save()
+        return removed_count
+
     def get_all_files(self):
-        """返回所有文件记录的副本"""
+        """返回所有仍在共享期限内的文件记录副本。"""
         self.data = self._load()
-        return self.data.copy()
+        self.purge_expired()
+        return [item.copy() for item in self.data]
 
     def get_file_by_id(self, file_id):
         """根据 file_id 查找单条记录，未找到返回 None"""
         self.data = self._load()
+        self.purge_expired()
         for item in self.data:
             if item["file_id"] == file_id:
                 return item.copy()
@@ -107,6 +149,7 @@ class FileLatestTracker:
         如果没有记录返回 None
         """
         self.data = self._load()
+        self.purge_expired()
         if not self.data:
             return None
         # 按 updated_at 倒序取第一条

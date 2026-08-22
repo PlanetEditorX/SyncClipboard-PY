@@ -4,7 +4,7 @@ import tempfile
 import json
 import os
 from unittest.mock import patch
-from server.core.file_latest import FileLatestTracker
+from server.core.file_latest import FileLatestTracker, FILE_SHARE_TTL_SECONDS
 
 class TestFileLatestTracker(unittest.TestCase):
     def setUp(self):
@@ -103,7 +103,10 @@ class TestFileLatestTracker(unittest.TestCase):
         self.assertIsNone(item2["source"])
         self.assertIsNone(item2["ip"])
         self.assertIsNone(item2["port"])
-        self.assertEqual(item2["updated_at"], 1234567890.0)
+        self.assertAlmostEqual(
+            item2["updated_at"],
+            os.path.getmtime(self.temp_file)
+        )
 
     @patch('time.time', return_value=1234567890.0)
     def test_upsert_file_insert(self, mock_time):
@@ -189,12 +192,35 @@ class TestFileLatestTracker(unittest.TestCase):
         with patch('time.time', return_value=200.0):
             tracker.upsert_file("id2", "/p/2.txt", "2.txt", 20, "local", "1.1.1.1", 1234)
 
-        latest = tracker.get_latest()
+        with patch('time.time', return_value=400.0):
+            latest = tracker.get_latest()
         self.assertEqual(latest["file_id"], "id3")
 
         # Modify copy should not affect tracker
         latest["file_id"] = "modified"
         self.assertEqual(tracker.data[1]["file_id"], "id3")
+
+    @patch('time.time', return_value=1000.0)
+    def test_get_all_files_prunes_at_expiration_boundary(self, mock_time):
+        tracker = FileLatestTracker()
+        tracker.upsert_file("id1", "/p/1.txt", "1.txt", 10, "local", "1.1.1.1", 1234)
+
+        mock_time.return_value = 1000.0 + FILE_SHARE_TTL_SECONDS - 0.001
+        self.assertEqual(len(tracker.get_all_files()), 1)
+
+        mock_time.return_value = 1000.0 + FILE_SHARE_TTL_SECONDS
+        self.assertEqual(tracker.get_all_files(), [])
+
+        with open(self.temp_file, "r", encoding="utf-8") as f:
+            self.assertEqual(json.load(f), [])
+
+    @patch('time.time', return_value=2000.0)
+    def test_get_file_by_id_rejects_expired_record(self, mock_time):
+        tracker = FileLatestTracker()
+        tracker.upsert_file("id1", "/p/1.txt", "1.txt", 10, "local", "1.1.1.1", 1234)
+
+        mock_time.return_value = 2000.0 + FILE_SHARE_TTL_SECONDS
+        self.assertIsNone(tracker.get_file_by_id("id1"))
 
     def test_remove_file(self):
         tracker = FileLatestTracker()

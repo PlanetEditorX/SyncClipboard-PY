@@ -4,6 +4,7 @@ import threading
 from datetime import datetime, timedelta
 from common.utils import SAFE_POST
 from common.notification import show_notification, show_notification_with_click
+from server.core.file_latest import is_file_record_expired
 
 logger = logging.getLogger("gui")
 
@@ -68,9 +69,22 @@ class ClipboardHandler:
             with open(self.config.FILE_LATEST_FILE, 'r', encoding='utf-8') as f:
                 file_list = json.load(f)
 
+            if isinstance(file_list, dict):
+                file_list = [file_list]
+            if not isinstance(file_list, list):
+                return
+
             name_list = []
             msg = ""
             for file in file_list:
+                if not isinstance(file, dict):
+                    continue
+                if is_file_record_expired(file):
+                    logger.info(
+                        "文件记录已过期，跳过通知: %s",
+                        file.get('file_id')
+                    )
+                    continue
                 file_id = file.get('file_id')
                 if not file_id:
                     return
