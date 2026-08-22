@@ -1,7 +1,8 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
-from common.utils import isExpired, safe_get, parse_filename_from_cd
+import requests
+from common.utils import isExpired, safe_get, parse_filename_from_cd, safe_post
 
 class TestSafeGet(unittest.TestCase):
     def test_safe_get_happy_path(self):
@@ -102,6 +103,41 @@ class TestParseFilenameFromCd(unittest.TestCase):
         # Simple format
         header = 'attachment; filename=TEST.txt'
         self.assertEqual(parse_filename_from_cd(header), "TEST.txt")
+
+class TestSafePost(unittest.TestCase):
+    @patch('common.utils.requests.post')
+    def test_safe_post_success(self, mock_post):
+        mock_response = MagicMock()
+        mock_post.return_value = mock_response
+
+        result = safe_post("http://example.com", data={"key": "value"})
+
+        self.assertEqual(result, mock_response)
+        mock_post.assert_called_once_with("http://example.com", timeout=10, data={"key": "value"})
+
+    @patch('common.utils._handle_request_error')
+    @patch('common.utils.requests.post')
+    def test_safe_post_connect_timeout(self, mock_post, mock_handle_error):
+        mock_post.side_effect = requests.exceptions.ConnectTimeout()
+        result = safe_post("http://example.com")
+        self.assertIsNone(result)
+        mock_handle_error.assert_called_once_with("连接失败", "服务器连接超时")
+
+    @patch('common.utils._handle_request_error')
+    @patch('common.utils.requests.post')
+    def test_safe_post_connection_error(self, mock_post, mock_handle_error):
+        mock_post.side_effect = requests.exceptions.ConnectionError()
+        result = safe_post("http://example.com")
+        self.assertIsNone(result)
+        mock_handle_error.assert_called_once_with("连接失败", "服务器不可达")
+
+    @patch('common.utils._handle_request_error')
+    @patch('common.utils.requests.post')
+    def test_safe_post_generic_exception(self, mock_post, mock_handle_error):
+        mock_post.side_effect = ValueError("Some error")
+        result = safe_post("http://example.com")
+        self.assertIsNone(result)
+        mock_handle_error.assert_called_once_with("错误", "Some error")
 
 
 if __name__ == '__main__':
