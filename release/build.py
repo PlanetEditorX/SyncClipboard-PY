@@ -1,91 +1,121 @@
-# release/build.py
+"""Build the Windows onedir distribution without side effects on import."""
+
+import io
+import os
 import shutil
 import subprocess
-from pathlib import Path
 import sys
-import io
+from pathlib import Path
 
-# 强制 stdout 使用 utf-8，避免 CI 环境编码错误
-if sys.stdout.encoding != 'utf-8':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-# ---------- 路径定义 ----------
-RELEASE_DIR = Path(__file__).resolve().parent          # release/
-PROJECT_ROOT = RELEASE_DIR.parent                      # 项目根目录
-
-DIST_DIR = RELEASE_DIR / "dist"                        # 最终输出
-WORK_DIR = RELEASE_DIR / "build_cache"                 # PyInstaller 临时文件
-SPEC_DIR = RELEASE_DIR / "spec"                        # spec 文件
-
+RELEASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = RELEASE_DIR.parent
+DIST_DIR = RELEASE_DIR / "dist"
+APP_DIR = DIST_DIR / "SyncClipboard"
+WORK_DIR = RELEASE_DIR / "build_cache"
+SPEC_DIR = RELEASE_DIR / "spec"
 ENTRY_SCRIPT = PROJECT_ROOT / "gui" / "run.py"
 ICON_FILE = PROJECT_ROOT / "gui" / "icon" / "icon-active.png"
 
-# ---------- 清理 release 目录下所有旧文件（保留本脚本自身）----------
-print("[Clean] 清理 release 目录下所有旧文件（除 build.py）...")
-for item in RELEASE_DIR.iterdir():
-    if item.name == "build.py" or item.name == "bat" or item.name == "macrodroid":
-        continue
-    if item.is_dir():
-        shutil.rmtree(item, ignore_errors=True)
-        print(f"  已删除目录: {item}")
-    else:
-        item.unlink(missing_ok=True)
-        print(f"  已删除文件: {item}")
 
-# ---------- PyInstaller 打包（隐藏黑框）----------
-print("\n[Build] 开始 PyInstaller 打包（窗口模式，无控制台）...")
-cmd = [
-    sys.executable, "-m", "PyInstaller",
-    "--noconfirm",
-    "--clean",
-    "--onefile",
-    "--windowed",
-    "--name=SyncClipboard",
-    "--distpath", str(DIST_DIR),
-    "--workpath", str(WORK_DIR),
-    "--specpath", str(SPEC_DIR),
-    f"--icon={ICON_FILE}",
-    "--paths", str(PROJECT_ROOT),
-    "--hidden-import=win32clipboard",
-    "--hidden-import=watchdog",
-    "--hidden-import=watchdog.observers",
-    "--hidden-import=watchdog.events",
-    str(ENTRY_SCRIPT)
-]
+def _configure_stdout():
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-subprocess.run(cmd, check=True)
-print("PyInstaller 打包完成。")
 
-# ---------- 复制运行时需要的资源 ----------
-print("\n[Copy] 复制配置文件和图标到 dist/ ...")
+def _customtkinter_dir():
+    try:
+        import customtkinter
+    except ImportError as exc:
+        raise RuntimeError("请先安装 requirements.txt 中的 customtkinter") from exc
+    return Path(customtkinter.__file__).resolve().parent
 
-exe_path = DIST_DIR / "SyncClipboard.exe"
-if not exe_path.exists():
-    raise RuntimeError("未找到生成的 exe，打包可能失败！")
 
-# 1. config 文件夹（复制 example 配置）
-src_config = PROJECT_ROOT / "config" / "example"
-dst_config = DIST_DIR / "config"
-shutil.copytree(src_config, dst_config, dirs_exist_ok=True)
-print(f"  ✓ config -> {dst_config}")
+def build_command(customtkinter_dir=None):
+    """Return the PyInstaller command so CI can inspect it without building."""
+    customtkinter_dir = Path(customtkinter_dir or _customtkinter_dir()).resolve()
+    return [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--noconfirm",
+        "--clean",
+        "--onedir",
+        "--windowed",
+        "--name=SyncClipboard",
+        "--distpath",
+        str(DIST_DIR),
+        "--workpath",
+        str(WORK_DIR),
+        "--specpath",
+        str(SPEC_DIR),
+        f"--icon={ICON_FILE}",
+        "--paths",
+        str(PROJECT_ROOT),
+        "--hidden-import=win32clipboard",
+        "--hidden-import=watchdog",
+        "--hidden-import=watchdog.observers",
+        "--hidden-import=watchdog.events",
+        "--add-data",
+        f"{customtkinter_dir}{os.pathsep}customtkinter",
+        str(ENTRY_SCRIPT),
+    ]
 
-# 2. 图标文件夹
-dst_icon = DIST_DIR / "gui" / "icon"
-dst_icon.mkdir(parents=True, exist_ok=True)
-for fname in ["icon.ico", "icon-active.png", "icon-stop.png"]:
-    src = PROJECT_ROOT / "gui" / "icon" / fname
-    if src.exists():
-        shutil.copy2(src, dst_icon / fname)
-print(f"  ✓ 图标 -> {dst_icon}")
 
-# 3. bat文件夹
-src_bat = RELEASE_DIR / "bat"
-dst_bat = DIST_DIR
-if src_bat.exists():
-    for file in src_bat.glob("*.bat"):
-        shutil.copy2(file, dst_bat / file.name)
-    print(f"  ✓ bat 文件 -> {dst_bat}")
+def clean_release_outputs():
+    print("[Clean] 清理旧构建输出...")
+    for item in RELEASE_DIR.iterdir():
+        if item.name in {"build.py", "bat", "macrodroid"}:
+            continue
+        if item.is_dir():
+            shutil.rmtree(item, ignore_errors=True)
+            print(f"  已删除目录: {item}")
+        else:
+            item.unlink(missing_ok=True)
+            print(f"  已删除文件: {item}")
 
-print(f"\n[Success] 打包成功！")
-print(f"单文件 exe 位置: {exe_path}")
-print(f"发布时请将整个 {DIST_DIR} 文件夹（exe + config/ + gui/icon/）一起分发。")
+
+def copy_runtime_assets():
+    exe_path = APP_DIR / "SyncClipboard.exe"
+    if not exe_path.exists():
+        raise RuntimeError("未找到生成的 exe，打包可能失败")
+
+    # Keep templates separate from mutable runtime config, so extracting a new
+    # release over an existing folder does not overwrite the user's settings.
+    src_config = PROJECT_ROOT / "config" / "example"
+    dst_config = APP_DIR / "config" / "example"
+    shutil.copytree(src_config, dst_config, dirs_exist_ok=True)
+    print(f"  [OK] 配置模板 -> {dst_config}")
+
+    dst_icon = APP_DIR / "gui" / "icon"
+    dst_icon.mkdir(parents=True, exist_ok=True)
+    for filename in ("icon.ico", "icon-active.png", "icon-stop.png"):
+        source = PROJECT_ROOT / "gui" / "icon" / filename
+        if source.exists():
+            shutil.copy2(source, dst_icon / filename)
+    print(f"  [OK] 图标 -> {dst_icon}")
+
+    src_bat = RELEASE_DIR / "bat"
+    if src_bat.exists():
+        for file in src_bat.glob("*.bat"):
+            shutil.copy2(file, APP_DIR / file.name)
+        print(f"  [OK] bat 文件 -> {APP_DIR}")
+    return exe_path
+
+
+def main():
+    _configure_stdout()
+    clean_release_outputs()
+    print("\n[Build] 开始 PyInstaller onedir 打包（窗口模式）...")
+    subprocess.run(build_command(), check=True)
+    print("PyInstaller 打包完成。")
+
+    print("\n[Copy] 复制运行时资源...")
+    exe_path = copy_runtime_assets()
+    print("\n[Success] 打包成功！")
+    print(f"应用位置: {exe_path}")
+    print(f"发布时请将整个 {APP_DIR} 文件夹一起分发。")
+
+
+if __name__ == "__main__":
+    main()

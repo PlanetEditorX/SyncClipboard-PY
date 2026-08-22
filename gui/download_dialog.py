@@ -1,14 +1,9 @@
 import logging
 import threading
 import tkinter as tk
-from pathlib import Path
 from tkinter import ttk
 from common.utils import post_to_main_thread, get_tk_root, post_to_main_thread_no_wait, BASE_DIR
-
-try:
-    import customtkinter as ctk
-except ImportError:
-    ctk = None
+from gui.ui_backend import create_root, ctk
 
 import ctypes
 
@@ -18,19 +13,22 @@ logger = logging.getLogger("gui")
 class DownloadProgressDialog:
     """下载进度对话框（支持复用，线程安全）"""
     def __init__(self, title="下载进度", master=None):
+        self._owns_master = False
         # 如果调用者没有提供 master，则使用已注册的全局根窗口
         if master is None:
             master = get_tk_root()
             if master is None:
                 logger.warning("No Tk root registered. Creating a temporary root.")
-                if ctk is not None and hasattr(ctk, 'CTk'):
-                    master = ctk.CTk()
-                else:
-                    master = tk.Tk()
+                master, self._use_customtkinter = create_root()
+                self._owns_master = True
                 master.withdraw()
+            else:
+                self._use_customtkinter = ctk is not None and isinstance(master, ctk.CTk)
+        else:
+            self._use_customtkinter = ctk is not None and isinstance(master, ctk.CTk)
         self.master = master
 
-        if ctk is not None and hasattr(ctk, 'CTkToplevel'):
+        if self._use_customtkinter:
             self.window = ctk.CTkToplevel(master)
         else:
             self.window = tk.Toplevel(master)
@@ -52,9 +50,9 @@ class DownloadProgressDialog:
         except Exception as e:
             logger.warning(f"加载图标失败: {e}", exc_info=True)
 
-        if ctk is not None and hasattr(self.window, 'configure'):
+        if self._use_customtkinter:
             try:
-                self.window.configure(fg_color="#f7f7f7")
+                self.window.configure(fg_color=("#F4F7FB", "#080D18"))
             except Exception as e:
                 logger.warning(f"配置窗口前景色失败: {e}", exc_info=True)
         else:
@@ -63,8 +61,8 @@ class DownloadProgressDialog:
             except Exception as e:
                 logger.warning(f"配置窗口背景色失败: {e}", exc_info=True)
 
-        if ctk is not None and hasattr(ctk, 'CTkFrame'):
-            self.container = ctk.CTkFrame(self.window, fg_color="#f7f7f7")
+        if self._use_customtkinter:
+            self.container = ctk.CTkFrame(self.window, fg_color=("#F4F7FB", "#080D18"))
         else:
             self.container = tk.Frame(self.window, bg="#f7f7f7")
         self.container.grid(row=0, column=0, sticky='nsew')
@@ -74,14 +72,14 @@ class DownloadProgressDialog:
         except Exception as e:
             logger.warning(f"配置行权重失败: {e}", exc_info=True)
 
-        if ctk is not None and hasattr(ctk, 'CTkLabel'):
+        if self._use_customtkinter:
             self.label = ctk.CTkLabel(self.container, text="正在下载文件...", font=("微软雅黑", 15, "bold"), anchor='w')
         else:
             self.label = tk.Label(self.container, text="正在下载文件...", font=("微软雅黑", 15, "bold"), bg="#f7f7f7", anchor='w')
         self.label.grid(row=0, column=0, padx=20, pady=(20, 10), sticky='ew')
 
         self.progress_var = tk.DoubleVar()
-        if ctk is not None and hasattr(ctk, 'CTkProgressBar'):
+        if self._use_customtkinter:
             self.progress_bar = ctk.CTkProgressBar(self.container, mode='determinate')
             self._use_ctk_progress = True
         else:
@@ -95,13 +93,13 @@ class DownloadProgressDialog:
             self._use_ctk_progress = False
         self.progress_bar.grid(row=1, column=0, padx=20, pady=5, sticky='ew')
 
-        if ctk is not None and hasattr(ctk, 'CTkLabel'):
+        if self._use_customtkinter:
             self.detail_label = ctk.CTkLabel(self.container, text="准备下载...", font=("微软雅黑", 11), anchor='w')
         else:
             self.detail_label = tk.Label(self.container, text="准备下载...", font=("微软雅黑", 11), bg="#f7f7f7", anchor='w')
         self.detail_label.grid(row=2, column=0, padx=20, pady=(5, 15), sticky='ew')
 
-        if ctk is not None and hasattr(ctk, 'CTkButton'):
+        if self._use_customtkinter:
             self.cancel_button = ctk.CTkButton(
                 self.container, text="取消下载", command=self.cancel,
                 width=120, height=32, corner_radius=8
@@ -224,6 +222,8 @@ class DownloadProgressDialog:
             try:
                 if self.window.winfo_exists():
                     self.window.destroy()
+                if self._owns_master and self.master.winfo_exists():
+                    self.master.destroy()
             except Exception as e:
                 logger.warning(f"取消下载销毁窗口失败: {e}", exc_info=True)
         post_to_main_thread(_destroy)
@@ -235,6 +235,8 @@ class DownloadProgressDialog:
             try:
                 if self.window.winfo_exists():
                     self.window.destroy()
+                if self._owns_master and self.master.winfo_exists():
+                    self.master.destroy()
             except Exception as e:
                 logger.warning(f"关闭对话框销毁窗口失败: {e}", exc_info=True)
         post_to_main_thread(_destroy)
