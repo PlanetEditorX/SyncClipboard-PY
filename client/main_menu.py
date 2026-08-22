@@ -34,6 +34,8 @@ class SyncClient:
         # 全局锁，避免同时读写剪贴板
         self.clipboard_lock = threading.Lock()
         self.tracker = TextTracker()
+        if self.file_server and hasattr(self.file_server, 'set_remote_text_handler'):
+            self.file_server.set_remote_text_handler(self.apply_remote_text)
 
     def safe_paste(self, retries=5):
         for _ in range(retries):
@@ -70,17 +72,51 @@ class SyncClient:
                     continue
 
                 self.last_file_set = None
-                with self.clipboard_lock:
-                    text = self.safe_paste()
-                if text is None:
-                    text = ""
-                if text != self.last_text:
-                    if text and text != self._last_remote_content:
-                        self.push_text(text)
-                    self.last_text = text
+                text_to_push = self._get_local_text_to_push()
+                if text_to_push is not None:
+                    self.push_text(text_to_push)
             except Exception as e:
                 logger.error(f"监听异常: {e}")
             time.sleep(0.5)
+
+    def _get_local_text_to_push(self):
+        """原子地读取剪贴板并判断这次变化是否需要上传。"""
+        with self.clipboard_lock:
+            text = self.safe_paste() or ""
+            if text == self.last_text:
+                return None
+
+            is_remote_echo = text == self._last_remote_content
+            self.last_text = text
+            # 远程内容标记只用于抑制紧随其后的那一次剪贴板变化。
+            self._last_remote_content = None
+
+        if not text or is_remote_echo:
+            return None
+        return text
+
+    def apply_remote_text(self, latest):
+        """应用服务器文字，并同步更新上传监听状态以阻断回环。"""
+        if not isinstance(latest, dict):
+            return False
+
+        item_id = latest.get("id")
+        content = latest.get("content")
+        source = latest.get("source")
+        if not item_id or content is None or source == self.local_name:
+            return False
+        if item_id == self.last_remote_id or self.tracker.is_duplicate(item_id):
+            return False
+
+        with self.clipboard_lock:
+            pyperclip.copy(content)
+            self.last_remote_id = item_id
+            self._last_remote_content = content
+            self.last_text = content
+
+        self.tracker.update(latest)
+        logger.info(f"更新剪贴板: {content[:50]} (来自 {source})")
+        return True
 
     def push_text(self, text):
         try:
@@ -166,14 +202,11 @@ class SyncClient:
                 if resp.status_code == 200:
                     data = resp.json()
                     latest = data.get("latest_global")
-                    if latest and latest.get("source") != self.local_name:
-                        if latest["id"] != self.last_remote_id:
-                            with self.clipboard_lock:
-                                pyperclip.copy(latest["content"])
-                            self.last_remote_id = latest["id"]
-                            self._last_remote_content = latest["content"]
-                            self.last_text = latest["content"]
-                            logger.info(f"拉取并更新剪贴板: {latest['content'][:50]} (来自 {latest['source']})")
+                    if self.apply_remote_text(latest):
+                        logger.info(
+                            f"拉取并更新剪贴板: {latest['content'][:50]} "
+                            f"(来自 {latest['source']})"
+                        )
             except Exception as e:
                 logger.error(f"拉取失败: {e} 等待10秒后重试")
                 time.sleep(7)

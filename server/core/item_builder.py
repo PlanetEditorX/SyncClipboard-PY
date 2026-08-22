@@ -36,21 +36,6 @@ def build_text_item(text, source, pasted=False, timestamp=None):
     }
     return item
 
-def generate_id(*args):
-    raw = "".join([str(a) for a in args])
-    return hashlib.md5(raw.encode()).hexdigest()
-
-def build_text_item(text, source, pasted=False):
-    item_id = generate_id(text, source, datetime.now().isoformat())
-    return {
-        "id": item_id,
-        "type": "text",
-        "content": text,
-        "timestamp": datetime.now().isoformat(),
-        "source": source,
-        "pasted": pasted
-    }
-
 def build_file_item(file_paths, source, pasted=False):
     """根据文件路径列表构建文件条目（仅元数据）"""
     files_info = []

@@ -44,6 +44,7 @@ class FileServer:
         self.shared_files = {}
         self.shared_file_registered_at = {}
         self._shared_files_lock = threading.RLock()
+        self._remote_text_handler = None
         self.app = Flask(__name__)
         # 关闭 Flask 默认访问日志
         logging.getLogger("werkzeug").setLevel(logging.ERROR)
@@ -94,7 +95,9 @@ class FileServer:
                 logger.info(f"更新文字列表 - 请求来自: {client_ip}")
                 latest = data.get("latest_global")
                 if latest and latest.get("source") != self.local_name:
-                    if latest["id"] != self.last_remote_id:
+                    if self._remote_text_handler is not None:
+                        self._remote_text_handler(latest)
+                    elif latest["id"] != self.last_remote_id:
                         # 更新到文件
                         if self.tracker.is_duplicate(latest["id"]):
                             return jsonify({"status": "duplicate", "message": "重复内容"}), 200
@@ -222,6 +225,10 @@ class FileServer:
                 return response
 
             return send_file(path, as_attachment=True)
+
+    def set_remote_text_handler(self, handler):
+        """将远程文字交给剪贴板监听器统一处理，避免接收后再次上传。"""
+        self._remote_text_handler = handler
 
     def register_file(self, file_id, path):
         """

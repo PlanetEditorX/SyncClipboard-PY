@@ -423,11 +423,12 @@ def text_sync():
     if encode == "base64":
         content = base64.b64decode(content).decode('utf-8')
 
-    if source == LOCAL_NAME and content == tracker.get_latest_global_content():
-        return jsonify({"status": "ignored", "message": "忽略自身来源"}), 200
-
     if not content:
         return jsonify({"status": "error", "message": "内容为空"}), 400
+
+    # 任意客户端把全局最新文字原样发回，都属于同步回音；不再改变来源或重新广播。
+    if content == tracker.get_latest_global_content():
+        return jsonify({"status": "ignored", "message": "忽略重复回传内容"}), 200
 
     item = build_text_item(text=content, source=source, pasted=False)
 

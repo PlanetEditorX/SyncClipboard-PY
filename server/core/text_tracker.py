@@ -46,11 +46,15 @@ class TextTracker:
 
     def is_duplicate(self, item_id: str) -> bool:
         """检查 ID 是否已存在（去重）"""
-        return item_id in self.data["global_ids"]
+        with self.lock:
+            self.data = self._load()
+            return item_id in self.data["global_ids"]
 
     def update(self, item: dict, force_latest=False):
         # 写入时加锁，保证原子性
         with self.lock:
+            # 多个进程可能共用同一个记录文件，写入前必须刷新。
+            self.data = self._load()
             source = item.get("source", "unknown")
             item_id = item["id"]
 
@@ -90,15 +94,19 @@ class TextTracker:
 
     def get_latest_global_content(self):
         """返回最新的文字内容"""
-        return safe_get(self._save, "latest_global", "content")
+        with self.lock:
+            self.data = self._load()
+            return safe_get(self.data, "latest_global", "content")
 
     def mark_pasted(self, client_name: str, item: dict):
         """标记客户端已粘贴某内容，更新对应客户端条目和全局最新状态"""
-        # 更新该客户端的条目（如果还不存在就创建）
-        self.data["clients"][client_name] = item
-        # 如果全局最新的 id 正好是这个条目的 id，把 global 的 pasted 也设为 true
-        latest = self.data.get("latest_global")
-        if latest and latest.get("id") == item["id"]:
-            latest["pasted"] = True
-            self.data["latest_global"] = latest
-        self._save()
+        with self.lock:
+            self.data = self._load()
+            # 更新该客户端的条目（如果还不存在就创建）
+            self.data["clients"][client_name] = item
+            # 如果全局最新的 id 正好是这个条目的 id，把 global 的 pasted 也设为 true
+            latest = self.data.get("latest_global")
+            if latest and latest.get("id") == item["id"]:
+                latest["pasted"] = True
+                self.data["latest_global"] = latest
+            self._save()
