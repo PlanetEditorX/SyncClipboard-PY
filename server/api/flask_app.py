@@ -1006,6 +1006,26 @@ def upload_file_to_download():
 
     # 解析 redirect_url 中的 filename 参数（作为保存的文件名）
     parsed = urlparse(redirect_url)
+    redirect_hostname = parsed.hostname
+
+    # SSRF防护：校验重定向主机名是否可信
+    if not redirect_hostname:
+        return jsonify({"status": "error", "message": "无效的 redirect_url"}), 400
+
+    is_trusted = False
+    if redirect_hostname in ['127.0.0.1', 'localhost']:
+        is_trusted = True
+    else:
+        with _lock:
+            for c in clients:
+                if c.get("ip") == redirect_hostname:
+                    is_trusted = True
+                    break
+
+    if not is_trusted:
+        logging.warning(f"拒绝未授权的重定向地址: {redirect_url}")
+        return jsonify({"status": "error", "message": "不信任的重定向地址"}), 403
+
     query_params = parse_qs(parsed.query)
     encoded_filename = query_params.get('filename', ['uploaded_file'])[0]
     filename = unquote(encoded_filename).replace('\\', '/')
